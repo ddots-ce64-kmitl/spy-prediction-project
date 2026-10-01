@@ -1,0 +1,33 @@
+=====================================================
+ SPY 7-YEAR TIME SERIES PREDICTION (LINEAR ALGEBRA)  
+=====================================================
+
+Total Daily Records: 1559
+Number of Feature Indicators: 20
+
+--- Regression Evaluation Metrics ---
+Mean Squared Error (MSE)     : 0.00006312
+Root Mean Squared Error (RMSE): 0.00794473
+Mean Absolute Error (MAE)    : 0.00600715
+
+--- Correlation with Next Day Return ---
+bollinger_bandwidth    0.000366
+hl_spread              0.000352
+volatility_20d         0.000218
+vol_ratio             -0.000004
+sma_200               -0.000102
+bollinger_upper       -0.000108
+sma_50                -0.000109
+sma_20                -0.000132
+ema_26                -0.000133
+sma_10                -0.000145
+ema_12                -0.000149
+bollinger_lower       -0.000157
+sma_5                 -0.000161
+macd_signal           -0.000343
+log_return            -0.000353
+macd_hist             -0.000361
+roc_10                -0.000418
+macd                  -0.000437
+rsi_14                -0.000474
+co_spread             -0.001033
