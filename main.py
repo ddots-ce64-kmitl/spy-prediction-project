@@ -1,9 +1,18 @@
-from src.pipeline import run_full_pipeline
+import os
+from src.pipeline import run_rolling_correlation_pipeline
 
 if __name__ == "__main__":
-    print("เริ่มการทำงานโปรเจกต์วิเคราะห์ SPY ด้วย Linear Algebra...")
-    run_full_pipeline(
-        csv_path="data/spy_us_d.csv",
-        output_dir="result"
+    SPY_DATA_PATH = "data/spy_data.csv"
+    INDICATOR_DATA_PATH = "data/CPI.csv"
+    OUTPUT_RESULT_PATH = "result/y.csv"
+
+    os.makedirs("result", exist_ok=True)
+    
+    results_df = run_rolling_correlation_pipeline(
+        spy_path=SPY_DATA_PATH,
+        indicator_path=INDICATOR_DATA_PATH,
+        window_years=7,
+        max_lag=14
     )
-    print("เสร็จสิ้นขั้นตอนทั้งหมด! ตรวจสอบไฟล์ใน result/predictions.csv และ result/metrics.txt")
+
+    results_df.to_csv(OUTPUT_RESULT_PATH, index=False)

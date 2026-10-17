@@ -1,148 +1,106 @@
-import os
-import numpy as np
 import pandas as pd
-import yfinance as yf
+import numpy as np
 
-def run_full_pipeline(csv_path="data/spy_us_d.csv", output_dir="result"):
-    # ---------------------------------------------------------
-    # 1. ดาวน์โหลด/โหลดข้อมูล SPY ย้อนหลัง 7 ปี อัตโนมัติ
-    # ---------------------------------------------------------
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
-
-    if not os.path.exists(csv_path):
-        print("กำลังดาวน์โหลดข้อมูล SPY ย้อนหลัง 7 ปีจาก yfinance...")
-        df_raw = yf.download("SPY", period="7y", interval="1d")
-        df_raw = df_raw.reset_index()
-        if isinstance(df_raw.columns, pd.MultiIndex):
-            df_raw.columns = df_raw.columns.get_level_values(0)
-        df_raw.columns = [str(c).lower() for c in df_raw.columns]
-        df_raw.to_csv(csv_path, index=False)
-        print(f"บันทึกข้อมูลตั้งต้นเรียบร้อยที่ {csv_path}")
-    else:
-        print(f"พบไฟล์ข้อมูลเดิมที่ {csv_path} กำลังอ่านข้อมูล...")
-        df_raw = pd.read_csv(csv_path)
-        df_raw.columns = [str(c).lower() for c in df_raw.columns]
-
-    df = df_raw.copy()
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
-
-    # ---------------------------------------------------------
-    # 2. คำนวณ Technical Indicators 20 ตัว (Features X)
-    # ---------------------------------------------------------
-    # Group 1: Returns & Price Spreads (3 ตัว)
-    df["log_return"] = np.log(df["close"] / df["close"].shift(1))
-    df["hl_spread"] = df["high"] - df["low"]
-    df["co_spread"] = df["close"] - df["open"]
-
-    # Group 2: Moving Averages & Trend (10 ตัว)
-    for w in [5, 10, 20, 50, 200]:
-        df[f"sma_{w}"] = df["close"].rolling(w).mean()
-
-    df["ema_12"] = df["close"].ewm(span=12, adjust=False).mean()
-    df["ema_26"] = df["close"].ewm(span=26, adjust=False).mean()
-    df["macd"] = df["ema_12"] - df["ema_26"]
-    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_signal"]
-
-    # Group 3: Volatility & Bollinger Bands (4 ตัว)
-    df["volatility_20d"] = df["log_return"].rolling(20).std()
-    bollinger_mid = df["sma_20"]
-    bollinger_std = df["close"].rolling(20).std()
-    df["bollinger_upper"] = bollinger_mid + (2 * bollinger_std)
-    df["bollinger_lower"] = bollinger_mid - (2 * bollinger_std)
-    df["bollinger_bandwidth"] = (df["bollinger_upper"] - df["bollinger_lower"]) / bollinger_mid
-
-    # Group 4: Momentum (2 ตัว)
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / (loss + 1e-8)
-    df["rsi_14"] = 100 - (100 / (1 + rs))
-    df["roc_10"] = df["close"].pct_change(10) * 100
-
-    # Group 5: Volume Ratio (1 ตัว)
-    df["vol_sma_20"] = df["volume"].rolling(20).mean()
-    df["vol_ratio"] = df["volume"] / (df["vol_sma_20"] + 1e-8)
-
-    # Target Variable: Log Return วันถัดไป (t+1)
-    df["target_return_next_day"] = df["log_return"].shift(-1)
-
-    # ลบแถวที่มีค่า NaN จากการคำนวณ Window
-    df = df.dropna().reset_index(drop=True)
-
-    indicator_cols = [
-        "log_return", "hl_spread", "co_spread",
-        "sma_5", "sma_10", "sma_20", "sma_50", "sma_200",
-        "ema_12", "ema_26", "macd", "macd_signal", "macd_hist",
-        "volatility_20d", "bollinger_upper", "bollinger_lower", "bollinger_bandwidth",
-        "rsi_14", "roc_10", "vol_ratio"
-    ]
-
-    # ---------------------------------------------------------
-    # 3. Correlation Matrix ด้วย Linear Algebra
-    # ---------------------------------------------------------
-    X_raw = df[indicator_cols].values
+def run_rolling_correlation_pipeline(
+    spy_path: str,
+    indicator_path: str,
+    window_years: int = 7,
+    max_lag: int = 14,
+    min_samples: int = 100
+) -> pd.DataFrame:
     
-    # Standardize (Z-score Normalization)
-    mu = np.mean(X_raw, axis=0)
-    sigma = np.std(X_raw, axis=0) + 1e-8
-    Z = (X_raw - mu) / sigma
+    # 1. โหลด spy_data.csv (ข้าม Header 3 บรรทัดแรกตามโครงสร้าง yfinance)
+    spy_df = pd.read_csv(
+        spy_path,
+        skiprows=3,
+        header=None,
+        names=['date', 'close', 'high', 'low', 'open', 'volume']
+    )
+    
+    # 2. โหลดไฟล์ Indicator
+    ind_df = pd.read_csv(indicator_path)
 
-    # Matrix multiplication: R = (1 / (n - 1)) * Z^T * Z
-    n = Z.shape[0]
-    R = (Z.T @ Z) / (n - 1)
-    corr_df = pd.DataFrame(R, index=indicator_cols, columns=indicator_cols)
+    # อ่านชื่อคอลัมน์อัตโนมัติ (คอลัมน์แรกเป็นวันที่, คอลัมน์สองเป็นค่า Indicator)
+    indicator_date_col = ind_df.columns[0]  # เช่น 'observation_date'
+    indicator_val_col = ind_df.columns[1]   # เช่น 'CPIAUCSL' หรือชื่อ Indicator นั้นๆ
 
-    # ---------------------------------------------------------
-    # 4. Time Series OLS Regression (Normal Equation)
-    # ---------------------------------------------------------
-    Y = df["target_return_next_day"].values
-    X_design = np.hstack([np.ones((Z.shape[0], 1)), Z])
+    # 3. แปลง Date เป็น Datetime และตั้งค่าเป็น Index
+    spy_df['date'] = pd.to_datetime(spy_df['date'])
+    ind_df[indicator_date_col] = pd.to_datetime(ind_df[indicator_date_col])
 
-    # Train / Test Split (80/20)
-    train_size = int(len(X_design) * 0.8)
-    X_train, X_test = X_design[:train_size], X_design[train_size:]
-    Y_train, Y_test = Y[:train_size], Y[train_size:]
+    spy_df = spy_df.sort_values('date').set_index('date')
+    ind_df = ind_df.sort_values(indicator_date_col).set_index(indicator_date_col)
 
-    # Normal Equation: beta = (X^T * X)^(-1) * X^T * Y
-    beta = np.linalg.inv(X_train.T @ X_train) @ X_train.T @ Y_train
-    Y_pred = X_test @ beta
+    # 4. Alignment ข้อมูล ยึดวันทำการของ S&P 500 เป็นหลัก
+    combined_df = pd.DataFrame(index=spy_df.index)
+    combined_df['spy_open'] = pd.to_numeric(spy_df['open'], errors='coerce')
+    
+    # ffill เติมค่าล่าสุดสำหรับ Indicator ที่ประกาศรายเดือน/รายสัปดาห์
+    combined_df['indicator'] = pd.to_numeric(ind_df[indicator_val_col], errors='coerce').reindex(combined_df.index, method='ffill')
+    
+    # ดักกรณีราคาเปิด SPY เป็นค่าว่าง
+    combined_df = combined_df.dropna(subset=['spy_open'])
 
-    # Calculation of Metrics
-    mse = np.mean((Y_test - Y_pred) ** 2)
-    rmse = np.sqrt(mse)
-    mae = np.mean(np.abs(Y_test - Y_pred))
+    # 5. คำนวณช่วงปี 7 ปี
+    years = sorted(combined_df.index.year.unique())
+    start_year = years[0]
+    end_year = years[-1]
+    max_start_year = end_year - window_years + 1
 
-    # ---------------------------------------------------------
-    # 5. บันทึกผลลัพธ์ลงโฟลเดอร์ result/
-    # ---------------------------------------------------------
-    pred_path = os.path.join(output_dir, "predictions.csv")
-    metrics_path = os.path.join(output_dir, "metrics.txt")
+    results = []
 
-    pred_df = pd.DataFrame({
-        "date": df["date"].iloc[train_size:].values if "date" in df.columns else np.arange(len(Y_test)),
-        "actual_return": Y_test,
-        "predicted_return": Y_pred
-    })
-    pred_df.to_csv(pred_path, index=False)
+    # 6. ลูป Rolling Windows & Lead/Lag
+    for win_start in range(start_year, max_start_year + 1):
+        win_end = win_start + window_years - 1
+        window_label = f"{win_start}-{win_end}"
 
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        f.write("=====================================================\n")
-        f.write(" SPY 7-YEAR TIME SERIES PREDICTION (LINEAR ALGEBRA)  \n")
-        f.write("=====================================================\n\n")
-        f.write(f"Total Daily Records: {len(df)}\n")
-        f.write(f"Number of Feature Indicators: {len(indicator_cols)}\n\n")
-        f.write("--- Regression Evaluation Metrics ---\n")
-        f.write(f"Mean Squared Error (MSE)     : {mse:.8f}\n")
-        f.write(f"Root Mean Squared Error (RMSE): {rmse:.8f}\n")
-        f.write(f"Mean Absolute Error (MAE)    : {mae:.8f}\n\n")
-        f.write("--- Correlation with Next Day Return ---\n")
-        corr_with_target = pd.Series(
-            (Z.T @ Y) / (n - 1), index=indicator_cols
-        ).sort_values(ascending=False)
-        f.write(corr_with_target.to_string() + "\n")
+        for lag in range(-max_lag, max_lag + 1):
+            # Shift บนชุดข้อมูลเต็มก่อนตัดกรอบ 7 ปี เพื่อดักขอบข้อมูลต้นปี
+            shifted_ind = combined_df['indicator'].shift(lag)
+            
+            temp_df = pd.DataFrame({
+                'spy_open': combined_df['spy_open'],
+                'indicator_shifted': shifted_ind
+            })
 
-    print(f"ประมวลผลสำเร็จ! ผลลัพธ์ถูกบันทึกไว้ในโฟลเดอร์ {output_dir}/")
+            win_data = temp_df.loc[f"{win_start}-01-01":f"{win_end}-12-31"]
+            valid_pairs = win_data.dropna(subset=['spy_open', 'indicator_shifted'])
+
+            if len(valid_pairs) >= min_samples:
+                corr_val = valid_pairs['spy_open'].corr(valid_pairs['indicator_shifted'])
+                
+                # ----------------------------------------------------
+                # [เพิ่มใหม่] คำนวณช่วงวันที่ของ SPY
+                # ----------------------------------------------------
+                spy_start_dt = valid_pairs.index.min().strftime('%Y-%m-%d')
+                spy_end_dt = valid_pairs.index.max().strftime('%Y-%m-%d')
+                spy_date_range = f"{spy_start_dt} to {spy_end_dt}"
+                
+                # ----------------------------------------------------
+                # [เพิ่มใหม่] คำนวณช่วงวันที่ของ Indicator ที่ย้อน/นำหน้าตาม lag
+                # ----------------------------------------------------
+                valid_positions = combined_df.index.get_indexer(valid_pairs.index)
+                ind_positions = valid_positions - lag  # คำนวณตำแหน่งวันที่ของ Indicator ก่อน shift
+                
+                ind_start_dt = combined_df.index[ind_positions.min()].strftime('%Y-%m-%d')
+                ind_end_dt = combined_df.index[ind_positions.max()].strftime('%Y-%m-%d')
+                indicator_date_range = f"{ind_start_dt} to {ind_end_dt}"
+                
+            else:
+                corr_val = np.nan
+                spy_date_range = np.nan
+                indicator_date_range = np.nan
+
+            results.append({
+                'window': window_label,
+                'start_year': win_start,
+                'end_year': win_end,
+                'indicator_name': indicator_val_col,
+                'lag': lag,
+                'valid_days_count': len(valid_pairs),
+                'spy_date_range': spy_date_range,              # <-- คอลัมน์ใหม่ 1
+                'indicator_date_range': indicator_date_range,  # <-- คอลัมน์ใหม่ 2
+                'correlation': corr_val
+            })
+
+    return pd.DataFrame(results)
